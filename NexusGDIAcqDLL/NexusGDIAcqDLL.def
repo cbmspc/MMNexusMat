@@ -1,0 +1,9 @@
+LIBRARY	NexusAcqDLL
+
+EXPORTS
+  NexusAPI_Init				@1
+  NexusAPI_Start			@2
+  NexusAPI_Stop				@3
+  NexusAPI_GetData			@4
+  NexusAPI_GetDataForward	@5
+  
