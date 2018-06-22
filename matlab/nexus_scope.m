@@ -81,7 +81,7 @@ PlotEveryNSample = 2;
 AutoScaleAllow = [(6/2^22/20), 6.00];
 
 % Allowable range for refresh period
-RefreshPeriodAllow = [1/4, 4];
+RefreshPeriodAllow = [1/8, 8];
 
 %20100721
 if nargin > 2
@@ -196,8 +196,9 @@ AngryLineColor = 0.7*AngryFontColor;
 % tmp2([1:2:64],:) = tmp([1:32],:);
 % tmp2([2:2:64],:) = tmp([64:-1:33],:);
 
-% Provide recording buffer using memory mapped file
-BufferDurationSec = floor(120*60*512/SampleRate);
+% Provide recording buffer using memory mapped file. 
+% 63 minutes takes about 4 GiB at 2048 Hz
+BufferDurationSec = floor(63*60*2048/SampleRate);
 
 
 NexusChanNamesFileName = [getcccdatadir() filesep 'intermediate' filesep 'NexusChanNames.mat'];
@@ -453,7 +454,7 @@ for ch = 1:Nchan
     tmp = get(gca,'Children');
     Kids(ch) = tmp(1);
     Choffsets(ch) = choffset;
-    Grandkids(ch) = text(size(rawsignal,2)/SampleRate,-choffset,'INFODISPLY','BackgroundColor',BgdFontColor,'Color',1-BgdFontColor,'FontName','FixedWidth','FontSize',FontSize,'FontWeight','bold','LineWidth',0.50, 'BackgroundColor','none');
+    Grandkids(ch) = text(size(rawsignal,2)/SampleRate,-choffset,'INFODISPLY','BackgroundColor',BgdFontColor,'Color',1-BgdFontColor,'FontName','Consolas','FontSize',FontSize,'FontWeight','bold','LineWidth',0.50, 'BackgroundColor','none');
     %set(gca,'YLim',[-Nchan-1,0],'YTick',[-Nchan:-1],'YTickLabel',[Nchan:-1:1]);
     
     if ismember(ch, DIAGchan)
@@ -536,6 +537,8 @@ if ~TwoColumnMode
     %set(gca,'XTickLabel',fliplr(tmp));
     PlotYLim = get(gca,'YLim');
     text(0.5,PlotYLim(1)-0.4,'1 s','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
+    EventIndicatorLight = text(1.5,PlotYLim(1)-0.4,'EVNT','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
+    EventIndicatorText = text(2.5,PlotYLim(1)-0.4,'EVNT','HorizontalAlignment','left','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
     for t = 0:AnalysisDuration
         TimeKid(1,t+1) = text(t,PlotYLim(1)-0.4,'|','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
     end
@@ -551,6 +554,8 @@ else
         subplot(subplothand(i));
         PlotYLim = get(gca,'YLim');
         text(0.5,PlotYLim(1)-0.4,'1 s','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
+        EventIndicatorLight(i) = text(1.5,PlotYLim(1)-0.4,'EVNT','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
+        EventIndicatorText(i) = text(2.5,PlotYLim(1)-0.4,'EVNT','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
         for t = 0:AnalysisDuration
             TimeKid(i,t+1) = text(t,PlotYLim(1)-0.4,'|','HorizontalAlignment','center','Color',1-BgdFontColor,'BackgroundColor',BgdFontColor);
         end
@@ -737,6 +742,8 @@ end
 SaveFileName = ['nexusautosave-' suid '.mat'];
 SaveUNC = [SavePathName filesep SaveFileName];
 mmfilename = [SavePathName filesep 'nexus_scope_mmf_0.dat'];
+set(thwarning, 'String', 'Preparing..', 'Visible', 'on');
+drawnow
 retry = 1;
 while retry
     if retry >= 100
@@ -751,10 +758,12 @@ while retry
     mmfilename = [SavePathName filesep 'nexus_scope_mmf_' num2str(retry) '.dat'];
     retry = retry + 1;
 end
+fprintf('Initializing memory mapped file.\n');
 fwrite(fid, zeros(1,2), 'double');
 fwrite(fid, zeros(1,1), 'double');
 fwrite(fid, zeros(1,1), 'double');
 fwrite(fid, zeros((Nchan+1)*BufferDurationSec*SampleRate,1), 'double');
+fwrite(fid, zeros(1*BufferDurationSec*SampleRate,1), 'uint16');
 fclose(fid);
 mmfobj = memmapfile(mmfilename, 'Format', ...
     {
@@ -762,12 +771,14 @@ mmfobj = memmapfile(mmfilename, 'Format', ...
     'double', [1,1], 'samplerate'
     'double', [1,1], 'recordendposition'
     'double', [Nchan+1, BufferDurationSec*SampleRate], 'rawdata'
+    'uint16', [1, BufferDurationSec*SampleRate], 'rawevent'
     }, ...
-    'Repeat', 1, 'Writable', true);
+    'Repeat', 1, 'Writable', true); % The last channel is for time stamp
 buffersize = size(mmfobj.Data.rawdata,2);
 mmfobj.Data.dimensions = [Nchan+1, BufferDurationSec*SampleRate];
 mmfobj.Data.samplerate = SampleRate;
 rawdata = [];
+rawevent = [];
 fprintf('Memory mapped file: %s \n',mmfilename);
 
 if nargout >= 2
@@ -781,6 +792,8 @@ else
     Warned.NotRecorded = 1;
     RecordStart = 1;
 end
+set(thwarning, 'Visible', 'off');
+drawnow
 
 
 try
@@ -808,6 +821,15 @@ errorfraction = 0;
 HasChanges = zeros(1,Nchan);
 ChannelStd = zeros(1,Nchan);
 ChSpres = zeros(1,Nchan);
+
+
+set(gcf, 'KeyPressFcn', @f_fig_keypress);
+
+PrevTitleStr = '';
+
+
+
+
 
 % main loop
 Timer.loopstart = clock;
@@ -1533,363 +1555,464 @@ end
 nexus_exit();
 
 fprintf('Memory mapped file: %s \n',mmfilename);
-fprintf('Autosaving to MATLAB format. This is separate from the segment save.\n');
-rawdata = mmfobj.Data.rawdata(:,mmfobj.Data.rawdata(end,:)>0);
-[~, i1] = min(rawdata(end,:));
-[~, i2] = max(rawdata(end,:));
-if i2 < i1
-    rawdata = rawdata(1:end,[i1:end, 1:i2]);
-else
-    rawdata = rawdata(1:end,i1:i2);
-end
-save(SaveUNC, 'rawdata', 'SampleRate', 'ChanNames', 'OriginalChanNames', '-v7.3');
-fprintf('done.\n');
-fprintf('Autosave file: %s \n',SaveUNC);
 
 if SWrecord
     nexus_savesegment(mmfilename, mmfobj, RecordStart, STATUSchan, SegmentSaveUNC, SampleRate, ChanNames);
 end
 
+rawdata = mmfobj.Data.rawdata(:,mmfobj.Data.rawdata(end,:)>0);
+rawevent = mmfobj.Data.rawevent(:,mmfobj.Data.rawdata(end,:)>0);
+[~, i1] = min(rawdata(end,:));
+[~, i2] = max(rawdata(end,:));
+if i2 < i1
+    rawdata = rawdata(1:end,[i1:end, 1:i2]);
+    rawevent = rawevent(1:end,[i1:end, 1:i2]);
+else
+    rawdata = rawdata(1:end,i1:i2);
+    rawevent = rawevent(1:end,i1:i2);
+end
+fprintf('Autosaving the memory mapped file. This is separate from the segment save.\n');
+save(SaveUNC, 'rawdata', 'rawevent', 'SampleRate', 'ChanNames', 'OriginalChanNames', '-v7.3');
+fprintf('Autosave file: %s \n',SaveUNC);
+fprintf('done.\n');
 rawdata = rawdata(:,rawdata(STATUSchan(1),:)>0);
 rawdata = rawdata(:,rawdata(end,:) >= RecordStart);
 rawdata = rawdata(1:end-1,:);
 
-function nexus_exit ()
-try
-    nexus_unload;
-    try
-        assignin('base', 'naa_tnexusactive', tic);
+
+    function f_fig_keypress (hObject, eventdata)
+        Key = eventdata.Key;
+        if ~isempty(regexp(Key, '^numpad\d', 'match', 'once'))
+            Key = Key(7:end);
+        end
+        if ~isempty(regexp(Key, '([0-9a-z])|(space)|(return)', 'match', 'once'))
+            
+            % Check if there are existing keys recorded in the same time frame
+            a = CursorPosition+1;
+            b = CursorPosition+Deltasize;
+            L = length(a:b);
+            if ~isempty(a:b)
+                ma = mod(a-1, buffersize)+1;
+                mb = mod(b-1, buffersize)+1;
+                if mb >= ma
+                    Event = mmfobj.Data.rawevent(1,ma:mb);
+                else
+                    % Wrap around required
+                    Event = mmfobj.Data.rawevent(1,[ma:buffersize,1:mb]);
+                end
+                Event = Event(Event>0);
+            else
+                Event = [];
+            end
+            
+            if length(Key) == 1
+                Event = [Event uint8(Key)];
+            elseif strcmp(Key, 'space')
+                Event = [Event uint8(32)];
+            elseif strcmp(Key, 'return')
+                Event = [Event uint8(13)];
+            end
+            
+            if length(Event) > L
+                Event = Event(1:L);
+            else
+                Event = [Event zeros(1,L - length(Event))];
+            end
+            
+            % Write the event back
+            if ~isempty(a:b)
+                if mb >= ma
+                    mmfobj.Data.rawevent(1,ma:mb) = Event;
+                else
+                    % Wrap around required
+                    mmfobj.Data.rawevent(1,[ma:buffersize,1:mb]) = Event;
+                end
+            end
+        end
+
+        
     end
-    fprintf('DAQ unloaded.\n');
-catch
-    fprintf('Failed to unload DAQ.\n');
-end
 
 
-
-function blinkblinkwarning (WarnStates, thwarninghandles, OnTimeSec, OffTimeSec)
-persistent blinktic
-if isempty(blinktic)
-    blinktic = tic;
-end
-TotalSec = OnTimeSec + OffTimeSec;
-Tock = mod(toc(blinktic), TotalSec);
-if Tock <= OnTimeSec
-    TurnOn = 1;
-else
-    TurnOn = 0;
-end
-
-
-for i = 1:length(WarnStates)
-    if WarnStates(i)
-        for j = 1:size(thwarninghandles,2)
+    function nexus_exit ()
+        try
+            nexus_unload;
             try
-                if strcmp(get(thwarninghandles(i,j), 'Visible'), 'on')
-                    if ~TurnOn
-                        set(thwarninghandles(i,j), 'Visible', 'off');
-                    end
-                elseif strcmp(get(thwarninghandles(i,j), 'Visible'), 'off')
-                    if TurnOn
-                        set(thwarninghandles(i,j), 'Visible', 'on');
+                assignin('base', 'naa_tnexusactive', tic);
+            end
+            fprintf('DAQ unloaded.\n');
+        catch
+            fprintf('Failed to unload DAQ.\n');
+        end
+    end
+
+
+    function blinkblinkwarning (WarnStates, thwarninghandles, OnTimeSec, OffTimeSec)
+        persistent blinktic
+        if isempty(blinktic)
+            blinktic = tic;
+        end
+        TotalSec = OnTimeSec + OffTimeSec;
+        Tock = mod(toc(blinktic), TotalSec);
+        if Tock <= OnTimeSec
+            TurnOn = 1;
+        else
+            TurnOn = 0;
+        end
+        
+        
+        for i = 1:length(WarnStates)
+            if WarnStates(i)
+                for j = 1:size(thwarninghandles,2)
+                    try
+                        if strcmp(get(thwarninghandles(i,j), 'Visible'), 'on')
+                            if ~TurnOn
+                                set(thwarninghandles(i,j), 'Visible', 'off');
+                            end
+                        elseif strcmp(get(thwarninghandles(i,j), 'Visible'), 'off')
+                            if TurnOn
+                                set(thwarninghandles(i,j), 'Visible', 'on');
+                            end
+                        end
                     end
                 end
             end
         end
+        
+        drawnow
     end
-end
 
-drawnow
-
-
-function ERRORS = warningsystem (thwarning, Warned, WarnData, OnTimeSec, OffTimeSec, ElapsedTime)
-
-% persistent blinktic
-% if isempty(blinktic)
-%     blinktic = tic;
-% end
-% TotalSec = OnTimeSec*sum(a) + OffTimeSec;
-% Tock = mod(toc(blinktic), TotalSec);
-% if Tock <= OnTimeSec
-%     TurnOn = 1;
-% else
-%     TurnOn = 0;
-% end
-
-ERRORS = '';
-
-if ~ishandle(thwarning)
-    return
-end
-
-a = struct2cell(Warned);
-a = cat(2,a{:});
-if any(a)
-    set(thwarning, 'Visible', 'on');
-else
-    set(thwarning, 'Visible', 'off');
-    return
-end
-
-
-TotalSec = OnTimeSec*sum(a) + OffTimeSec;
-ind = floor(mod(ElapsedTime, TotalSec) / OnTimeSec) + 1;
-if mod(ElapsedTime, TotalSec) > OnTimeSec*sum(a)
-    set(thwarning, 'Visible', 'off');
-    return
-end
-
-fn = fieldnames(Warned);
-k = 0;
-for i = 1:length(fn)
-    if Warned.(fn{i})
-        k = k + 1;
-        if k == ind
-            set(thwarning, 'String', WarnData.(fn{i}).String);
-            set(thwarning, 'FontSize', WarnData.(fn{i}).FontSize);
-            set(thwarning, 'Color', WarnData.(fn{i}).Color1);
-            if ElapsedTime > 20
-                set(thwarning, 'Color', WarnData.(fn{i}).Color2);
-            end
-            set(thwarning, 'BackgroundColor', WarnData.(fn{i}).BackgroundColor);
-            set(thwarning, 'EdgeColor', WarnData.(fn{i}).EdgeColor);
-            set(thwarning, 'LineWidth', WarnData.(fn{i}).LineWidth);
-            set(thwarning, 'FontWeight', WarnData.(fn{i}).FontWeight);
-            set(thwarning, 'HorizontalAlignment', WarnData.(fn{i}).HorizontalAlignment);
-            set(thwarning, 'VerticalAlignment', WarnData.(fn{i}).VerticalAlignment);
-            set(thwarning, 'FontName', WarnData.(fn{i}).FontName);
-            ERRORS = WarnData.(fn{i}).String;
-            break
+    function ERRORS = warningsystem (thwarning, Warned, WarnData, OnTimeSec, OffTimeSec, ElapsedTime)
+        
+        % persistent blinktic
+        % if isempty(blinktic)
+        %     blinktic = tic;
+        % end
+        % TotalSec = OnTimeSec*sum(a) + OffTimeSec;
+        % Tock = mod(toc(blinktic), TotalSec);
+        % if Tock <= OnTimeSec
+        %     TurnOn = 1;
+        % else
+        %     TurnOn = 0;
+        % end
+        
+        ERRORS = '';
+        
+        if ~ishandle(thwarning)
+            return
         end
-    end
-end
-drawnow
-
-
-
-function updatetitle (Timer, CursorPosition, Deltasize, SampleRate, PreAllocatedSize, SWrecord, SWfilter, SWcar, NumNormalChannels, Ndatachan, DISPfullmedian, globalscale, ~, ~, titlehand, fighand, ERRORS, Fcutoff, Fcutoffhigh, SUBJECT, SAMPRATE, SWzscore)
-persistent PrevTitleStr
-LoopElapTimeStr = [num2str(etime(clock,Timer.loopstart)*1,'%10.0f') ' sec'];
-NRwarning = '';
-TRIGstatus = '';
-FIwarning = '';
-CAwarning = '';
-GCcount = '';
-if ~SWrecord
-    NRwarning = '(Not Recorded)';
-else
-    NRwarning = sprintf('(Buffer=%.0f/%.0f min)', (CursorPosition+Deltasize)/SampleRate/60, PreAllocatedSize/SampleRate/60);
-end
-if SWfilter
-    FIwarning = ['(BPF ' num2str(Fcutoffhigh,'%.2f') '-' num2str(Fcutoff,'%.2f') 'Hz)'];
-end
-if SWcar
-    CAwarning = '(CAR)';
-end
-if (NumNormalChannels/Ndatachan) >= 0.25
-    GCcount = ['(Stable: ' num2str(NumNormalChannels) '/' num2str(Ndatachan) ')'];
-else
-    GCcount = '(Unstable)';
-end
-
-% trigs = bitand(uint16(rawshortsignaltrig),TRIGbitvals(strcmpi(TRIGbittext,'TRIG')));
-% trigs = sum(trigs,1);
-% bb = getdigitalbounds(trigs.');
-% if ~isempty(bb)
-%     pulsewidth = mean((diff(bb,[],2)+1))/SampleRate
-%     iti = mean((diff(bb(:,1),[],1)))/SampleRate
-% end
-
-[UNITfactor, UNITname] = get_best_unitfactor (DISPfullmedian*globalscale);
-if SWzscore
-    UNITfactor = 1;
-    UNITname = 'Zscores';
-end
-
-TitleStr = ['Expm time: ' LoopElapTimeStr '; ' 'Scale: ' num2str(DISPfullmedian*globalscale*UNITfactor) ' ' UNITname ' ' GCcount FIwarning CAwarning NRwarning TRIGstatus];
-if ~strcmp(TitleStr,PrevTitleStr)
-    if min(ishandle(titlehand)) && ishandle(fighand)
-        set(titlehand,'String',TitleStr);
-        if mod(floor(now*86400/2),2)
-            % 2016-04-11 Po: Alternate between title and errors
-            set(fighand, 'Name', ['nexus_scope ' SUBJECT ' ' SAMPRATE ' ' ERRORS ' ' GCcount]);
+        
+        a = struct2cell(Warned);
+        a = cat(2,a{:});
+        if any(a)
+            set(thwarning, 'Visible', 'on');
         else
-            set(fighand, 'Name', [ERRORS ' ' 'nexus_scope ' SUBJECT ' ' SAMPRATE ' ' GCcount]);
+            set(thwarning, 'Visible', 'off');
+            return
+        end
+        
+        
+        TotalSec = OnTimeSec*sum(a) + OffTimeSec;
+        ind = floor(mod(ElapsedTime, TotalSec) / OnTimeSec) + 1;
+        if mod(ElapsedTime, TotalSec) > OnTimeSec*sum(a)
+            set(thwarning, 'Visible', 'off');
+            return
+        end
+        
+        fn = fieldnames(Warned);
+        k = 0;
+        for i = 1:length(fn)
+            if Warned.(fn{i})
+                k = k + 1;
+                if k == ind
+                    set(thwarning, 'String', WarnData.(fn{i}).String);
+                    set(thwarning, 'FontSize', WarnData.(fn{i}).FontSize);
+                    set(thwarning, 'Color', WarnData.(fn{i}).Color1);
+                    if ElapsedTime > 20
+                        set(thwarning, 'Color', WarnData.(fn{i}).Color2);
+                    end
+                    set(thwarning, 'BackgroundColor', WarnData.(fn{i}).BackgroundColor);
+                    set(thwarning, 'EdgeColor', WarnData.(fn{i}).EdgeColor);
+                    set(thwarning, 'LineWidth', WarnData.(fn{i}).LineWidth);
+                    set(thwarning, 'FontWeight', WarnData.(fn{i}).FontWeight);
+                    set(thwarning, 'HorizontalAlignment', WarnData.(fn{i}).HorizontalAlignment);
+                    set(thwarning, 'VerticalAlignment', WarnData.(fn{i}).VerticalAlignment);
+                    set(thwarning, 'FontName', WarnData.(fn{i}).FontName);
+                    ERRORS = WarnData.(fn{i}).String;
+                    break
+                end
+            end
+        end
+        drawnow
+    end
+
+
+    function updatetitle (Timer, CursorPosition, Deltasize, SampleRate, PreAllocatedSize, SWrecord, SWfilter, SWcar, NumNormalChannels, Ndatachan, DISPfullmedian, globalscale, ~, ~, titlehand, fighand, ERRORS, Fcutoff, Fcutoffhigh, SUBJECT, SAMPRATE, SWzscore)
+        LoopElapTimeStr = [num2str(etime(clock,Timer.loopstart)*1,'%10.0f') ' sec'];
+        NRwarning = '';
+        TRIGstatus = '';
+        FIwarning = '';
+        CAwarning = '';
+        GCcount = '';
+        if ~SWrecord
+            NRwarning = '(Not Recorded)';
+        else
+            NRwarning = sprintf('(Buffer=%.0f/%.0f min)', (CursorPosition+Deltasize)/SampleRate/60, PreAllocatedSize/SampleRate/60);
+        end
+        if SWfilter
+            FIwarning = ['(BPF ' num2str(Fcutoffhigh,'%.2f') '-' num2str(Fcutoff,'%.2f') 'Hz)'];
+        end
+        if SWcar
+            CAwarning = '(CAR)';
+        end
+        if (NumNormalChannels/Ndatachan) >= 0.25
+            GCcount = ['(Stable: ' num2str(NumNormalChannels) '/' num2str(Ndatachan) ')'];
+        else
+            GCcount = '(Unstable)';
+        end
+        
+        % trigs = bitand(uint16(rawshortsignaltrig),TRIGbitvals(strcmpi(TRIGbittext,'TRIG')));
+        % trigs = sum(trigs,1);
+        % bb = getdigitalbounds(trigs.');
+        % if ~isempty(bb)
+        %     pulsewidth = mean((diff(bb,[],2)+1))/SampleRate
+        %     iti = mean((diff(bb(:,1),[],1)))/SampleRate
+        % end
+        
+        [UNITfactor, UNITname] = get_best_unitfactor (DISPfullmedian*globalscale);
+        if SWzscore
+            UNITfactor = 1;
+            UNITname = 'Zscores';
+        end
+        
+        TitleStr = ['Expm time: ' LoopElapTimeStr '; ' 'Scale: ' num2str(DISPfullmedian*globalscale*UNITfactor) ' ' UNITname ' ' GCcount FIwarning CAwarning NRwarning TRIGstatus];
+        if ~strcmp(TitleStr,PrevTitleStr)
+            if min(ishandle(titlehand)) && ishandle(fighand)
+                set(titlehand,'String',TitleStr);
+                if mod(floor(now*86400/2),2)
+                    % 2016-04-11 Po: Alternate between title and errors
+                    set(fighand, 'Name', ['nexus_scope ' SUBJECT ' ' SAMPRATE ' ' ERRORS ' ' GCcount]);
+                else
+                    set(fighand, 'Name', [ERRORS ' ' 'nexus_scope ' SUBJECT ' ' SAMPRATE ' ' GCcount]);
+                end
+                
+            end
+        end
+        PrevTitleStr = TitleStr;
+        
+        
+        % Check for event too
+        if ishandle(EventIndicatorLight)
+            a = CursorPosition+1-3*SampleRate;
+            b = CursorPosition+1;
+            if ~isempty(a:b)
+                ma = mod(a-1, buffersize)+1;
+                mb = mod(b-1, buffersize)+1;
+                if mb >= ma
+                    Event = mmfobj.Data.rawevent(1,ma:mb);
+                else
+                    % Wrap around required
+                    Event = mmfobj.Data.rawevent(1,[ma:buffersize,1:mb]);
+                end
+                Event = Event(Event>0);
+            else
+                Event = [];
+            end
+            if isempty(Event)
+                set(EventIndicatorLight, 'Visible', 'off');
+                set(EventIndicatorText, 'String', '');
+            else
+                set(EventIndicatorLight, 'Visible', 'on');
+                set(EventIndicatorText, 'String', char(Event));
+            end
         end
         
     end
-end
-PrevTitleStr = TitleStr;
+
+
+
+    function nexus_savesegment (mmfilename, mmfobj, RecordStart, STATUSchan, SegmentSaveUNC, SampleRate, ChanNames)
+        fprintf('Memory mapped file: %s \n',mmfilename);
+        fprintf('Saving this segment to MATLAB format.\n');
+        % rawdata = mmfobj.Data.rawdata(:,mmfobj.Data.rawdata(end,:)>=RecordStart);
+        % [~, i1] = min(rawdata(end,:));
+        % [~, i2] = max(rawdata(end,:));
+        % if i2 < i1
+        %     rawdata = rawdata(1:end,[i1:end, 1:i2]);
+        % else
+        %     rawdata = rawdata(1:end,i1:i2);
+        % end
+        % rawdata = rawdata(1:end-1,rawdata(STATUSchan(1),:)>0);
+        % save(SegmentSaveUNC, 'rawdata', 'SampleRate', 'ChanNames', '-v7.3');
+        
+        % 2016-04-11 Po: New save format is [time points, channels] to facilitate
+        % faster saving and loading
+        rawsignaldata = permute(mmfobj.Data.rawdata(:,mmfobj.Data.rawdata(end,:)>=RecordStart),[2 1]);
+        rawevent = permute(mmfobj.Data.rawevent(:,mmfobj.Data.rawdata(end,:)>=RecordStart),[2 1]);
+        [~, i1] = min(rawsignaldata(:,end));
+        [~, i2] = max(rawsignaldata(:,end));
+        if i2 < i1
+            rawsignaldata = rawsignaldata([i1:end, 1:i2],:);
+            rawevent = rawevent([i1:end, 1:i2],:);
+        else
+            rawsignaldata = rawsignaldata(i1:i2,:);
+            rawevent = rawevent(i1:i2,:);
+        end
+        % 20180503: Bug fix: Swapped these two lines
+        rawevent = rawevent(rawsignaldata(:,STATUSchan(1))>0,:); 
+        rawsignaldata = rawsignaldata(rawsignaldata(:,STATUSchan(1))>0,1:end-1); 
+        save(SegmentSaveUNC, 'rawsignaldata', 'rawevent', 'SampleRate', 'ChanNames', '-v7.3');
+        
+        fprintf('Saved this segment to file: %s \n',SegmentSaveUNC);
+    end
+
+
+
+    function [FiltcoefB, FiltcoefA, nlookback] = get_filter_coef(SampleRate, Fcutoffhigh, Fcutoff)
+        FiltcoefB = 1;
+        FiltcoefA = 1;
+        
+        if Fcutoffhigh > 0
+            [FB2,FA2] = butter(2,Fcutoffhigh/(SampleRate/2),'high');
+            FiltcoefB = conv(FiltcoefB,FB2);
+            FiltcoefA = conv(FiltcoefA,FA2);
+        end
+        
+        tmp = Fcutoff/(SampleRate/2);
+        if tmp < 1
+            [FB2,FA2] = butter(2,tmp,'low');
+            FiltcoefB = conv(FiltcoefB,FB2);
+            FiltcoefA = conv(FiltcoefA,FA2);
+        end
+        
+        nlookback = max(length(FiltcoefA),length(FiltcoefB)) - 1;
+    end
 
 
 
 
-function nexus_savesegment (mmfilename, mmfobj, RecordStart, STATUSchan, SegmentSaveUNC, SampleRate, ChanNames)
-fprintf('Memory mapped file: %s \n',mmfilename);
-fprintf('Saving this segment to MATLAB format.\n');
-% rawdata = mmfobj.Data.rawdata(:,mmfobj.Data.rawdata(end,:)>=RecordStart);
-% [~, i1] = min(rawdata(end,:));
-% [~, i2] = max(rawdata(end,:));
-% if i2 < i1
-%     rawdata = rawdata(1:end,[i1:end, 1:i2]);
-% else
-%     rawdata = rawdata(1:end,i1:i2);
-% end
-% rawdata = rawdata(1:end-1,rawdata(STATUSchan(1),:)>0);
-% save(SegmentSaveUNC, 'rawdata', 'SampleRate', 'ChanNames', '-v7.3');
-
-% 2016-04-11 Po: New save format is [time points, channels] to facilitate
-% faster saving and loading
-rawsignaldata = permute(mmfobj.Data.rawdata(:,mmfobj.Data.rawdata(end,:)>=RecordStart),[2 1]);
-[~, i1] = min(rawsignaldata(:,end));
-[~, i2] = max(rawsignaldata(:,end));
-if i2 < i1
-    rawsignaldata = rawsignaldata([i1:end, 1:i2],:);
-else
-    rawsignaldata = rawsignaldata(i1:i2,:);
-end
-rawsignaldata = rawsignaldata(rawsignaldata(:,STATUSchan(1))>0,1:end-1); %#ok<NASGU>
-save(SegmentSaveUNC, 'rawsignaldata', 'SampleRate', 'ChanNames', '-v7.3');
-
-fprintf('Saved this segment to file: %s \n',SegmentSaveUNC);
-
-
-
-
-function [FiltcoefB, FiltcoefA, nlookback] = get_filter_coef(SampleRate, Fcutoffhigh, Fcutoff)
-FiltcoefB = 1;
-FiltcoefA = 1;
-
-if Fcutoffhigh > 0
-    [FB2,FA2] = butter(2,Fcutoffhigh/(SampleRate/2),'high');
-    FiltcoefB = conv(FiltcoefB,FB2);
-    FiltcoefA = conv(FiltcoefA,FA2);
-end
-
-tmp = Fcutoff/(SampleRate/2);
-if tmp < 1
-    [FB2,FA2] = butter(2,tmp,'low');
-    FiltcoefB = conv(FiltcoefB,FB2);
-    FiltcoefA = conv(FiltcoefA,FA2);
-end
-
-nlookback = max(length(FiltcoefA),length(FiltcoefB)) - 1;
-
-
-
-
-
-function [ChanNames, Chans] = populate_channames (ChanNames, Nchan, acqchan, DIAGchan, NchanPerRow, TwoColumnMode, subplothand)
-if ~isempty(who('ChanNames')) && ~isempty(ChanNames) && iscell(ChanNames)
-    if length(ChanNames) < Nchan
-        tmp = length(ChanNames);
-        tmp = tmp + 1;
-        while tmp <= Nchan
-            ChanNames{tmp} = num2str(acqchan(tmp));
-            tmp = tmp + 1;
+    function [ChanNames, Chans] = populate_channames (ChanNames, Nchan, acqchan, DIAGchan, NchanPerRow, TwoColumnMode, subplothand)
+        if ~isempty(who('ChanNames')) && ~isempty(ChanNames) && iscell(ChanNames)
+            if length(ChanNames) < Nchan
+                tmp = length(ChanNames);
+                tmp = tmp + 1;
+                while tmp <= Nchan
+                    ChanNames{tmp} = num2str(acqchan(tmp));
+                    tmp = tmp + 1;
+                end
+            end
+            Chans = ChanNames(1:Nchan);
+            Chans(DIAGchan) = {''};
+            for i = 1:length(Chans)
+                YLabel{i} = Chans{i};
+            end
+            if ~TwoColumnMode
+                set(gca,'YTickLabel',fliplr(YLabel));
+            else
+                for i = 1:2
+                    set(subplothand(i),'YTickLabel',fliplr(YLabel((i-1)*NchanPerRow+1:(i)*NchanPerRow)));
+                end
+            end
         end
     end
-    Chans = ChanNames(1:Nchan);
-    Chans(DIAGchan) = {''};
-    for i = 1:length(Chans)
-        YLabel{i} = Chans{i};
+
+
+
+    function scopecontrol_zoom_in (hObject, eventdata)
+        data = getappdata(hObject, 'data');
+        ax = data.gca;
+        ylmax = data.ylim;
+        yl = get(ax, 'YLim');
+        c = (yl(1)+yl(2))/2;
+        r = (yl(2)-yl(1))/2;
+        r = r / sqrt(2);
+        yl = c + [-r, r];
+        if yl(1) < ylmax(1), y1(1) = ylmax(1); end
+        if yl(2) > ylmax(2), yl(2) = ylmax(2); end
+        set(ax, 'YLim', yl);
     end
-    if ~TwoColumnMode
-        set(gca,'YTickLabel',fliplr(YLabel));
-    else
-        for i = 1:2
-            set(subplothand(i),'YTickLabel',fliplr(YLabel((i-1)*NchanPerRow+1:(i)*NchanPerRow)));
+
+
+    function scopecontrol_zoom_out (hObject, eventdata)
+        data = getappdata(hObject, 'data');
+        ax = data.gca;
+        ylmax = data.ylim;
+        yl = get(ax, 'YLim');
+        c = (yl(1)+yl(2))/2;
+        r = (yl(2)-yl(1))/2;
+        r = r * sqrt(2);
+        yl = c + [-r, r];
+        if yl(1) < ylmax(1), yl(1) = ylmax(1); end
+        if yl(2) > ylmax(2), yl(2) = ylmax(2); end
+        set(ax, 'YLim', yl);
+    end
+
+
+    function scopecontrol_pan_up (hObject, eventdata)
+        data = getappdata(hObject, 'data');
+        ax = data.gca;
+        ylmax = data.ylim;
+        yl = get(ax, 'YLim');
+        yl = yl + 1;
+        set(ax, 'YLim', yl);
+    end
+
+
+    function scopecontrol_pan_down (hObject, eventdata)
+        data = getappdata(hObject, 'data');
+        ax = data.gca;
+        ylmax = data.ylim;
+        yl = get(ax, 'YLim');
+        yl = yl - 1;
+        set(ax, 'YLim', yl);
+    end
+
+
+    function scopecontrol_reload_channames (hObject, eventdata)
+        setappdata(hObject, 'ToReloadChanNames', 1);
+    end
+
+
+    function scopecontrol_numeric_channames (hObject, eventdata)
+        if get(hObject, 'value')
+            setappdata(hObject, 'ToEnableNumericChanNames', 1);
+            setappdata(hObject, 'ToDisableNumericChanNames', 0);
+        else
+            setappdata(hObject, 'ToEnableNumericChanNames', 0);
+            setappdata(hObject, 'ToDisableNumericChanNames', 1);
         end
     end
+
+
+    function scopecontrol_restart_nexus (hObject, eventdata)
+        setappdata(hObject, 'ToRestartNexus', 1);
+    end
+
+
+    function restart_nexus (Nchan, SampleRate, AcqDuration)
+        disp('Attempting to restart Nexus');
+        
+        try
+            nexus_stop();
+        catch
+            disp('Error stopping');
+        end
+        
+        try
+            nexus_init(Nchan);
+        catch exception
+            disp(['Error: Error initialzing. ' exception.message]);
+            return
+        end
+        
+        try
+            nexus_start(SampleRate, AcqDuration);
+        catch exception
+            disp(['Error: Error starting data acquisition. ' exception.message]);
+            return
+        end
+    end
+
+
+
 end
-
-
-
-
-function scopecontrol_zoom_in (hObject, eventdata)
-data = getappdata(hObject, 'data');
-ax = data.gca;
-ylmax = data.ylim;
-yl = get(ax, 'YLim');
-c = (yl(1)+yl(2))/2;
-r = (yl(2)-yl(1))/2;
-r = r / sqrt(2);
-yl = c + [-r, r];
-if yl(1) < ylmax(1), y1(1) = ylmax(1); end
-if yl(2) > ylmax(2), yl(2) = ylmax(2); end
-set(ax, 'YLim', yl);
-
-
-function scopecontrol_zoom_out (hObject, eventdata)
-data = getappdata(hObject, 'data');
-ax = data.gca;
-ylmax = data.ylim;
-yl = get(ax, 'YLim');
-c = (yl(1)+yl(2))/2;
-r = (yl(2)-yl(1))/2;
-r = r * sqrt(2);
-yl = c + [-r, r];
-if yl(1) < ylmax(1), yl(1) = ylmax(1); end
-if yl(2) > ylmax(2), yl(2) = ylmax(2); end
-set(ax, 'YLim', yl);
-
-
-function scopecontrol_pan_up (hObject, eventdata)
-data = getappdata(hObject, 'data');
-ax = data.gca;
-ylmax = data.ylim;
-yl = get(ax, 'YLim');
-yl = yl + 1;
-set(ax, 'YLim', yl);
-
-
-function scopecontrol_pan_down (hObject, eventdata)
-data = getappdata(hObject, 'data');
-ax = data.gca;
-ylmax = data.ylim;
-yl = get(ax, 'YLim');
-yl = yl - 1;
-set(ax, 'YLim', yl);
-
-
-function scopecontrol_reload_channames (hObject, eventdata)
-setappdata(hObject, 'ToReloadChanNames', 1);
-
-
-function scopecontrol_numeric_channames (hObject, eventdata)
-if get(hObject, 'value')
-    setappdata(hObject, 'ToEnableNumericChanNames', 1);
-    setappdata(hObject, 'ToDisableNumericChanNames', 0);
-else
-    setappdata(hObject, 'ToEnableNumericChanNames', 0);
-    setappdata(hObject, 'ToDisableNumericChanNames', 1);
-end
-
-
-function scopecontrol_restart_nexus (hObject, eventdata)
-setappdata(hObject, 'ToRestartNexus', 1);
-
-
-function restart_nexus (Nchan, SampleRate, AcqDuration)
-disp('Attempting to restart Nexus');
-
-try
-    nexus_stop();
-catch
-    disp('Error stopping');
-end
-
-try
-    nexus_init(Nchan);
-catch exception
-    disp(['Error: Error initialzing. ' exception.message]);
-    return
-end
-
-try
-    nexus_start(SampleRate, AcqDuration); 
-catch exception
-    disp(['Error: Error starting data acquisition. ' exception.message]);
-    return
-end
-
